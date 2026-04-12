@@ -1,4 +1,3 @@
-import { getStream, wss } from 'puppeteer-stream';
 import defaultPuppeteer from 'puppeteer';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -6,17 +5,9 @@ import { createRequire } from 'module';
 import { execSync } from 'child_process';
 import { addExtra } from 'puppeteer-extra';
 import rebrowserPuppeteer from 'rebrowser-puppeteer-core';
+import { spawn } from 'child_process';
 
 const VIEWPORT = { width: 1920, height: 1080 };
-
-// Opening page must be a real HTTP URL — data: and chrome: URLs can't be captured by tabCapture
-const OPENING_PAGE_PATH = '/blank.html';
-
-// Resolve the puppeteer-stream extension path
-const require = createRequire(import.meta.url);
-const pStreamDir = path.dirname(require.resolve('puppeteer-stream'));
-const extensionPath = path.join(pStreamDir, '..', 'extension');
-const extensionId = 'jjndjgheafjngoipoacpjgeicjeomjli';
 
 // Windows virtual key codes for special keys (needed by CDP dispatchKeyEvent)
 const KEY_CODES = {
@@ -58,20 +49,20 @@ export class BrowserManager {
     this.onMedia = null;
     this.onUrlChange = null;
 
-    // WebM init segment — cached for late-joining clients
-    this.initSegment = null;
+    // Offset between X11 screen coords (FFmpeg) and page viewport coords (CDP)
+    // Chrome UI (tab bar, etc.) pushes the viewport down from the top of the screen
+    this.viewportOffsetX = 0;
+    this.viewportOffsetY = 0;
   }
 
   async launch(serverPort = 3000) {
     const execPath = process.env.PUPPETEER_EXECUTABLE_PATH || defaultPuppeteer.executablePath();
     console.log('Launching Chrome from:', execPath);
-    console.log('Extension path:', extensionPath);
 
-    // Launch browser ourselves (not via puppeteer-stream's launch) to avoid
-    // pipe:true which breaks in Docker. We load the extension manually.
     this.browser = await puppeteer.launch({
       executablePath: execPath,
       headless: false,
+      ignoreDefaultArgs: ['--enable-automation'], // Removes "controlled by automated software" infobar
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -82,22 +73,13 @@ export class BrowserManager {
         '--disable-features=AudioServiceSandbox',
         '--disable-blink-features=AutomationControlled',
         '--auto-accept-this-tab-capture',
-        `--disable-extensions-except=${extensionPath}`,
-        `--load-extension=${extensionPath}`,
+        '--display=:99',
+        '--start-maximized',
+        '--kiosk',
       ],
-      defaultViewport: VIEWPORT,
+      defaultViewport: null, // Let Chrome use natural kiosk viewport — must match X11/FFmpeg coords
       timeout: 60000,
     });
-
-    console.log('Chrome launched, setting up extension...');
-
-    // Open the extension options page — it connects to puppeteer-stream's internal WS
-    const wsPort = (await wss).address().port;
-    const extPage = await this.browser.newPage();
-    await extPage.goto(`chrome-extension://${extensionId}/options.html#${wsPort}`, {
-      waitUntil: 'domcontentloaded',
-    });
-    console.log(`Extension options page connected on port ${wsPort}`);
 
     // Create our working page
     this.page = await this.browser.newPage();
@@ -131,91 +113,98 @@ export class BrowserManager {
       waitUntil: 'domcontentloaded',
     });
 
-    // Invoke the extension for the current tab via real X11 keyboard shortcut.
-    // CDP keyboard events don't trigger Chrome extension commands, so we use xdotool.
     await this.page.bringToFront();
+
     try {
-      execSync('xdotool key ctrl+shift+y', { timeout: 5000 });
-      console.log('Extension invoked via xdotool');
+      // Force X11 to maximize and focus the Chrome window
+      execSync(`
+        export DISPLAY=:99
+        WID=$(xdotool search --onlyvisible --class "google-chrome" | head -1)
+        if [ ! -z "$WID" ]; then
+          xdotool windowactivate --sync "$WID"
+          xdotool windowfocus "$WID"
+          echo "Chrome window focused via xdotool"
+        fi
+      `, { shell: '/bin/bash', timeout: 5000 });
     } catch (err) {
-      console.warn('xdotool failed (non-fatal):', err.message);
+      console.warn('xdotool focus failed (non-fatal):', err.message);
     }
+
     await new Promise((r) => setTimeout(r, 500));
+
+    // Measure the offset between the X11 screen and the page viewport.
+    // FFmpeg captures the full screen, but CDP coordinates are relative to
+    // the page viewport (which starts below any Chrome UI like the tab bar).
+    const { innerWidth, innerHeight } = await this.page.evaluate(() => ({
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+    }));
+    this.viewportOffsetY = VIEWPORT.height - innerHeight;
+    this.viewportOffsetX = Math.round((VIEWPORT.width - innerWidth) / 2);
+    console.log(`Viewport: ${innerWidth}x${innerHeight}, offset: (${this.viewportOffsetX}, ${this.viewportOffsetY})`);
 
     await this.startMediaStream();
     console.log('Browser launched, media stream started');
   }
 
   async startMediaStream() {
-    this.stream = await getStream(this.page, {
-      audio: true,
-      video: true,
-      mimeType: 'video/webm;codecs=vp8,opus',
-      frameSize: 10,
-      videoBitsPerSecond: 3000000,
-      audioBitsPerSecond: 128000,
+    // 2. Spawn FFmpeg to capture the X11 display
+    const ffmpegArgs = [
+      // Low-latency global flags
+      '-fflags', 'nobuffer',
+      '-flags', 'low_delay',
+
+      // Video input — x11grab
+      '-f', 'x11grab',
+      '-draw_mouse', '0',
+      '-probesize', '32',
+      '-video_size', '1920x1080',
+      '-framerate', '24',
+      '-i', ':99.0',
+
+      // Audio input — PulseAudio
+      '-f', 'pulse',
+      '-probesize', '32',
+      '-i', 'default',
+
+       '-vf', 'scale=1280:720',
+
+      // Video encoding — H.264 with zero-latency tuning
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',       // Disables lookahead, B-frames — minimum latency
+      '-b:v', '1.5M',
+      '-g', '24',                    // keyframe every 1 second
+      '-r', '24',    // <-- Force output frame rate
+      '-threads', '8',
+      '-pix_fmt', 'yuv420p',
+
+      // Audio encoding
+      '-c:a', 'aac',
+      '-b:a', '128k',
+
+      // Fragmented MP4 — designed for streaming, no muxer buffering
+      '-f', 'mpegts',
+      '-mpegts_flags', '+initial_discontinuity',
+      'pipe:1',
+    ];
+
+    this.stream = spawn('ffmpeg', ffmpegArgs);
+
+    this.stream.stdout.on('data', (chunk) => {
+      if (this.onMedia) this.onMedia(chunk);
     });
 
-    // Accumulate initial chunks until we have the full WebM init segment
-    // (EBML header + Segment + Info + Tracks, everything before the first Cluster).
-    // The Cluster element ID is 0x1F43B675.
-    let initParts = [];
-    let initDone = false;
-    let chunkCount = 0;
-
-    let accumulationBuffer = Buffer.alloc(0);
-    const clusterPattern = Buffer.from([0x1F, 0x43, 0xB6, 0x75]);
-
-    this.stream.on('data', (chunk) => {
-      console.log(`Received chunk from p-stream: ${chunk.length} bytes at ${Date.now()}`);
-
-      // 1. Add new data to our running buffer
-      accumulationBuffer = Buffer.concat([accumulationBuffer, chunk]);
-      console.log(`Received chunk from p-stream: ${chunk.length} bytes at ${Date.now()}`);
-
-      // 2. If we haven't found the Init Segment yet, look for the first Cluster
-      if (!initDone) {
-        const clusterIdx = accumulationBuffer.indexOf(clusterPattern);
-        if (clusterIdx > 0) {
-          this.initSegment = accumulationBuffer.subarray(0, clusterIdx);
-          initDone = true;
-          console.log(`Media stream: init segment cached (${this.initSegment.length} bytes)`);
-          
-          // Remove the init segment from the buffer so only Clusters remain
-          accumulationBuffer = accumulationBuffer.subarray(clusterIdx);
-        } else if (accumulationBuffer.length > 65536) {
-          // Fallback
-          this.initSegment = accumulationBuffer;
-          initDone = true;
-          accumulationBuffer = Buffer.alloc(0); 
-        }
-        return; // Don't broadcast media until init segment is found
-      }
-
-      // 3. For live data, find the Next cluster boundary
-      // We start searching at index 1 so we don't just match the cluster we are currently parsing
-      let nextClusterIdx = accumulationBuffer.indexOf(clusterPattern, 1);
-      
-      // Keep pulling out clusters as long as we have complete ones in the buffer
-      while (nextClusterIdx !== -1) {
-        const completeCluster = accumulationBuffer.subarray(0, nextClusterIdx);
-        
-        if (this.onMedia) {
-          console.log(`Media stream: sending cluster chunk (${completeCluster.length} bytes)`);
-          this.onMedia(completeCluster); // Send a guaranteed whole cluster
-        }
-        
-        accumulationBuffer = accumulationBuffer.subarray(nextClusterIdx);
-        nextClusterIdx = accumulationBuffer.indexOf(clusterPattern, 1);
-      }
+    this.stream.stderr.on('data', (data) => {
+      // FFmpeg stats go to stderr — uncomment to debug
+      console.log(`FFmpeg: ${data}`);
     });
 
+    this.stream.on('close', (code) => {
+      console.log(`FFmpeg exited with code ${code}`);
+    });
     this.stream.on('error', (err) => {
-      console.error('Media stream error:', err.message);
-    });
-
-    this.stream.on('end', () => {
-      console.log('Media stream ended');
+      console.error("FFmpeg failed to start:", err.message);
     });
   }
 
@@ -237,10 +226,15 @@ export class BrowserManager {
 
   // --- Input injection ---
 
-  _enqueue(fn) {
-    this.inputQueue = this.inputQueue.then(fn).catch((err) => {
-      console.error('Input dispatch error:', err.message);
-    });
+   _enqueue(fn) {
+    this.inputQueue = this.inputQueue.then(fn)
+      .then((result) => {
+        // Log the successful response from CDP (usually an empty object {} if successful)
+        // console.log('CDP Event handled successfully:', result);
+      })
+      .catch((err) => {
+        console.error('Input dispatch error:', err.message);
+      });
   }
 
   dispatchMouse(subType, x, y, options = {}) {
@@ -251,23 +245,25 @@ export class BrowserManager {
     }[subType];
     if (!cdpType) return;
 
+    // Convert screen coords (from FFmpeg capture) to page viewport coords (for CDP)
     const params = {
       type: cdpType,
-      x: Math.round(x),
-      y: Math.round(y),
-      button: options.button || 'left',
+      x: Math.round(x) - this.viewportOffsetX,
+      y: Math.round(y) - this.viewportOffsetY,
+      button: options.button || (cdpType === 'mouseMoved' ? 'none' : 'left'),
       clickCount: options.clickCount || (cdpType === 'mousePressed' || cdpType === 'mouseReleased' ? 1 : 0),
       modifiers: options.modifiers || 0,
     };
 
+    // console.log("Sending mouse event:", params);
     this._enqueue(() => this.cdp.send('Input.dispatchMouseEvent', params));
   }
 
   dispatchWheel(x, y, deltaX, deltaY, modifiers = 0) {
     const params = {
       type: 'mouseWheel',
-      x: Math.round(x),
-      y: Math.round(y),
+      x: Math.round(x) - this.viewportOffsetX,
+      y: Math.round(y) - this.viewportOffsetY,
       deltaX: deltaX || 0,
       deltaY: deltaY || 0,
       modifiers,

@@ -16,94 +16,7 @@ let ws = null;
 let myId = null;
 let isController = false;
 let users = [];
-
-// --- MSE (Media Source Extensions) ---
-let mediaSource = null;
-let sourceBuffer = null;
-let pendingChunks = [];
-let mseReady = false;
-
-function initMSE() {
-  mediaSource = new MediaSource();
-  video.src = URL.createObjectURL(mediaSource);
-  console.log("video src ", video.src)
-
-  video.addEventListener('waiting', () => console.log('Video is waiting for more data...'));
-  video.addEventListener('playing', () => console.log('Video started playing!'));
-  video.addEventListener('stalled', () => console.log('Video stalled.'));
-
-  mediaSource.addEventListener('sourceopen', () => {
-    try {
-      sourceBuffer = mediaSource.addSourceBuffer('video/webm;codecs="vp8,opus"');
-    } catch (e) {
-      console.error('Failed to create SourceBuffer:', e);
-      return;
-    }
-
-    sourceBuffer.mode = 'segments';
-    mseReady = true;
-
-    sourceBuffer.addEventListener('updateend', () => {
-      // Append any queued chunks
-      if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-        sourceBuffer.appendBuffer(pendingChunks.shift());
-      }
-    });
-
-    // Flush any chunks that arrived before sourceopen
-    if (pendingChunks.length > 0 && !sourceBuffer.updating) {
-      sourceBuffer.appendBuffer(pendingChunks.shift());
-    }
-
-    sourceBuffer.addEventListener('error', (e) => {
-      console.error('SourceBuffer Error:', e);
-    });
-    sourceBuffer.addEventListener('abort', (e) => {
-      console.warn('SourceBuffer Aborted:', e);
-    });
-    mediaSource.addEventListener('sourceended', () => {
-      console.warn('MediaSource Ended');
-    });
-
-    console.log('MSE: SourceBuffer ready');
-  });
-}
-
-function appendMediaChunk(data) {
-  if (!mseReady || !sourceBuffer) {
-    pendingChunks.push(data);
-    return;
-  }
-
-  if (sourceBuffer.updating || pendingChunks.length > 0) {
-    pendingChunks.push(data);
-  } else {
-    try {
-      sourceBuffer.appendBuffer(data);
-      console.debug("Appended media chunk:", data.byteLength, "bytes");
-    } catch (e) {
-      console.warn('MSE append error:', e.message);
-    }
-  }
-}
-
-// Live edge tracking + buffer cleanup
-setInterval(() => {
-  if (!sourceBuffer || !video.buffered.length) return;
-  const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-  const latency = bufferedEnd - video.currentTime;
-
-  if (latency > 1.5) {
-    // If we're way behind, instant jump
-    video.currentTime = bufferedEnd - 0.2;
-  } else if (latency > 0.4) {
-    // If we're slightly behind, play 10% faster to quietly catch up
-    video.playbackRate = 1.1; 
-  } else {
-    // We are on the edge, play normal speed
-    video.playbackRate = 1.0;
-  }
-}, 500); // Check more frequently (every 500ms)
+let player = null;
 
 // --- Audio unmute ---
 audioBtn.addEventListener('click', () => {
@@ -112,6 +25,7 @@ audioBtn.addEventListener('click', () => {
     audioBtn.textContent = 'Mute';
     audioBtn.classList.remove('muted');
     audioBtn.classList.add('unmuted');
+    video.play().catch(() => {});
   } else {
     video.muted = true;
     audioBtn.textContent = 'Unmute';
@@ -130,10 +44,9 @@ function handleUrlInput(inputUrl) {
 
 // --- WebSocket ---
 function connect() {
-  initMSE();
-
+  initPlayer();
+  
   ws = new WebSocket(`ws://${window.location.host}`);
-  ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
     connectionStatus.textContent = 'Connected';
@@ -145,10 +58,10 @@ function connect() {
     connectionStatus.className = 'disconnected';
     myId = null;
     isController = false;
-    mseReady = false;
-    sourceBuffer = null;
-    mediaSource = null;
-    pendingChunks = [];
+    if (player) {
+      player.destroy();
+      player = null;
+    }
     updateControlUI();
     setTimeout(connect, 2000);
   };
@@ -156,12 +69,6 @@ function connect() {
   ws.onerror = () => {};
 
   ws.onmessage = (event) => {
-    // Binary message = WebM media chunk
-    if (event.data instanceof ArrayBuffer) {
-      console.debug("Received media chunk:", event.data.byteLength, "bytes");
-      appendMediaChunk(new Uint8Array(event.data));
-      return;
-    }
 
     const msg = JSON.parse(event.data);
     switch (msg.type) {
@@ -213,6 +120,59 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
   }
+}
+
+// --- Media player ---
+function initPlayer() {
+  if (player) {
+    player.destroy();
+    player = null;
+  }
+
+  if (!mpegts.isSupported()) {
+    console.error('mpegts.js is not supported in this browser');
+    return;
+  }
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  player = mpegts.createPlayer({
+    type: 'mpegts',
+    isLive: true,
+    url: `${protocol}//${window.location.host}/media`,
+  }, {
+    enableWorker: true,
+    liveBufferLatencyChasing: true,
+    liveBufferLatencyMaxLatency: 1.5,
+    liveBufferLatencyMinRemain: 0.3,
+    autoCleanupSourceBuffer: true,
+    autoCleanupMaxBackwardDuration: 5,
+    autoCleanupMinBackwardDuration: 3,
+  });
+
+  player.attachMediaElement(video);
+  player.load();
+
+  // Attempt autoplay (will work because video is muted)
+  player.play().catch(() => {
+    // Autoplay blocked — user will click unmute which can also trigger play
+  });
+
+  // Error recovery
+  player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+    console.error('mpegts.js error:', errorType, errorDetail, errorInfo);
+    // Attempt recovery after a delay
+    setTimeout(() => {
+      if (player) {
+        player.destroy();
+        initPlayer();
+      }
+    }, 2000);
+  });
+
+  player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
+    // Optional: display stats for debugging
+    console.debug('mpegts stats:', stats);
+  });
 }
 
 // --- UI updates ---

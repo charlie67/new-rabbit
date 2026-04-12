@@ -5,5 +5,5 @@
         * promosing but last updated 9 months ago
     * playwright
         * might have issues - similar to puppeeter
-3. use video instead of photos
-    * puppeteer-stream
+3. address laddy video
+    * ffmpeg is running at 4fps

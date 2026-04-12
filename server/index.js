@@ -12,12 +12,37 @@ const app = express();
 app.use(express.static(path.join(__dirname, '..', 'client')));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+ // Control WebSocket at / — carries JSON messages (mouse, keyboard, navigation, etc.)
+const controlWss = new WebSocketServer({ noServer: true });
+
+// Media WebSocket at /media — carries MPEG-TS binary stream
+const mediaWss = new WebSocketServer({ noServer: true });
 
 const room = new Room();
 
-wss.on('connection', (ws) => {
+controlWss.on('connection', (ws) => {
   room.addClient(ws);
+});
+
+mediaWss.on('connection', (ws) => {
+  room.addMediaClient(ws);
+});
+
+server.on('upgrade', (request, socket, head) => {
+  const { pathname } = new URL(request.url, `http://${request.headers.host}`);
+
+  if (pathname === '/') {
+    controlWss.handleUpgrade(request, socket, head, (ws) => {
+      controlWss.emit('connection', ws, request);
+    });
+  } else if (pathname === '/media') {
+    mediaWss.handleUpgrade(request, socket, head, (ws) => {
+      mediaWss.emit('connection', ws, request);
+    });
+  } else {
+    // Destroy connections to unknown paths
+    socket.destroy();
+  }
 });
 
 async function start() {

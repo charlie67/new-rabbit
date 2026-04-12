@@ -2,7 +2,7 @@
 set -e
 
 # Start virtual display — Chrome runs non-headless here so it outputs audio
-Xvfb :99 -screen 0 1920x1080x30 -nolisten tcp &
+Xvfb :99 -screen 0 1920x1080x24+32 -nolisten tcp &
 sleep 1
 
 # Start dbus (PulseAudio may need it)

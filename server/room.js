@@ -5,6 +5,7 @@ import { BrowserManager } from './browser-manager.js';
 export class Room {
   constructor() {
     this.clients = new Map(); // id -> { id, ws, nickname, isController }
+    this.mediaClients = new Set(); // WebSocket connections on /media path
     this.controllerId = null;
     this.browser = new BrowserManager();
 
@@ -45,12 +46,6 @@ export class Room {
       controllerId: this.controllerId,
       currentUrl: this.browser.getCurrentUrl(),
     });
-
-    // Send the WebM init segment so MSE can initialize
-    if (this.browser.initSegment && ws.readyState === 1) {
-      console.log("sending cached init segment to new client:", this.browser.initSegment.length, "bytes");
-      ws.send(this.browser.initSegment);
-    }
 
     // Notify others
     this.broadcastUserList();
@@ -150,9 +145,9 @@ export class Room {
   // --- Broadcasting ---
 
   broadcastMedia(chunk) {
-    for (const client of this.clients.values()) {
-      if (client.ws.readyState === 1 && client.ws.bufferedAmount < 1024 * 1024) {
-        client.ws.send(chunk);
+    for (const ws of this.mediaClients) {
+      if (ws.readyState === 1 && ws.bufferedAmount < 512 * 1024) {
+        ws.send(chunk);
       }
     }
   }
@@ -182,6 +177,29 @@ export class Room {
 
   broadcastUserList() {
     this.broadcast({ type: MSG.USER_LIST, users: this.getUserList() });
+  }
+
+  // --- Media WS ---
+  addMediaClient(ws) {
+    this.mediaClients.add(ws);
+    console.log(`Media client connected. Total media clients: ${this.mediaClients.size}`);
+
+    ws.on('close', () => {
+      this.mediaClients.delete(ws);
+      console.log(`Media client disconnected. Total media clients: ${this.mediaClients.size}`);
+    });
+
+    ws.on('error', () => {
+      this.mediaClients.delete(ws);
+    });
+  }
+
+  broadcastMedia(chunk) {
+    for (const ws of this.mediaClients) {
+      if (ws.readyState === 1 && ws.bufferedAmount < 512 * 1024) {
+        ws.send(chunk);
+      }
+    }
   }
 
   async close() {
