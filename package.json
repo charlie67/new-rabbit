@@ -1,0 +1,19 @@
+{
+  "name": "new-rabb-it",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "puppeteer": "^24.9.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "puppeteer-stream": "^3.0.22",
+    "rebrowser-puppeteer-core": "^24.8.1",
+    "ws": "^8.18.0"
+  }
+}
