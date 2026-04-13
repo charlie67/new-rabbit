@@ -120,6 +120,18 @@ export class Room {
         break;
       }
 
+      case MSG.NAV_BACK: {
+        if (this.controllerId !== clientId) return;
+        this.browser.goBack();
+        break;
+      }
+
+      case MSG.NAV_FORWARD: {
+        if (this.controllerId !== clientId) return;
+        this.browser.goForward();
+        break;
+      }
+
       case MSG.MOUSE_EVENT: {
         if (this.controllerId !== clientId) return;
         this.browser.dispatchMouse(msg.subType, msg.x, msg.y, {

@@ -16,6 +16,8 @@ export const MSG = {
   REQUEST_CONTROL:  'requestControl',
   RELEASE_CONTROL:  'releaseControl',
   NAVIGATE:         'navigate',
+  NAV_BACK:         'navBack',
+  NAV_FORWARD:      'navForward',
   MOUSE_EVENT:      'mouseEvent',
   KEY_EVENT:        'keyEvent',
   WHEEL_EVENT:      'wheelEvent',

@@ -179,8 +179,7 @@ export class BrowserManager {
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
       '-crf', '23',
-      '-g', '1',
-      '-r', '24',
+      '-g', '30',
       '-threads', '2',
       '-pix_fmt', 'yuv420p',
 
@@ -230,6 +229,18 @@ export class BrowserManager {
 
   getCurrentUrl() {
     return this.page ? this.page.url() : 'about:blank';
+  }
+
+  async goBack() {
+    try {
+      await this.page.goBack({ waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch {}
+  }
+
+  async goForward() {
+    try {
+      await this.page.goForward({ waitUntil: 'domcontentloaded', timeout: 15000 });
+    } catch {}
   }
 
   // --- Input injection ---

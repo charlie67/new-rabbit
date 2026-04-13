@@ -3,6 +3,8 @@ const video = document.getElementById('viewport');
 const overlay = document.getElementById('input-overlay');
 const urlInput = document.getElementById('url-input');
 const goBtn = document.getElementById('go-btn');
+const backBtn = document.getElementById('back-btn');
+const forwardBtn = document.getElementById('forward-btn');
 const connectionStatus = document.getElementById('connection-status');
 const userList = document.getElementById('user-list');
 const nicknameInput = document.getElementById('nickname-input');
@@ -252,6 +254,9 @@ goBtn.addEventListener('click', navigateToUrl);
 urlInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') navigateToUrl();
 });
+
+backBtn.addEventListener('click', () => send({ type: 'navBack' }));
+forwardBtn.addEventListener('click', () => send({ type: 'navForward' }));
 
 // --- Nickname ---
 nicknameBtn.addEventListener('click', () => {
