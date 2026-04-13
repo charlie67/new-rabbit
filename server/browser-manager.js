@@ -148,44 +148,52 @@ export class BrowserManager {
   }
 
   async startMediaStream() {
-    // 2. Spawn FFmpeg to capture the X11 display
     const ffmpegArgs = [
       // Low-latency global flags
       '-fflags', 'nobuffer',
       '-flags', 'low_delay',
+      '-analyzeduration', '0',
 
-      // Video input — x11grab
+      // Video input — x11grab (wallclock timestamps prevent muxer stalls)
+      '-use_wallclock_as_timestamps', '1',
+      '-thread_queue_size', '512',
       '-f', 'x11grab',
       '-draw_mouse', '0',
       '-probesize', '32',
       '-video_size', '1920x1080',
-      '-framerate', '24',
+      '-framerate', '30',
       '-i', ':99.0',
 
-      // Audio input — PulseAudio
+      // Audio input — PulseAudio (wallclock timestamps to stay in sync with video)
+      '-use_wallclock_as_timestamps', '1',
+      '-thread_queue_size', '512',
       '-f', 'pulse',
       '-probesize', '32',
       '-i', 'default',
 
-       '-vf', 'scale=1280:720',
+      '-vf', 'scale=1280:720',
+      '-af', 'aresample=async=1:first_pts=0',  // don't let audio block video
 
       // Video encoding — H.264 with zero-latency tuning
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
-      '-tune', 'zerolatency',       // Disables lookahead, B-frames — minimum latency
-      '-b:v', '1.5M',
-      '-g', '24',                    // keyframe every 1 second
-      '-r', '24',    // <-- Force output frame rate
-      '-threads', '8',
+      '-tune', 'zerolatency',
+      '-crf', '23',
+      '-g', '1',
+      '-r', '24',
+      '-threads', '2',
       '-pix_fmt', 'yuv420p',
 
       // Audio encoding
       '-c:a', 'aac',
       '-b:a', '128k',
 
-      // Fragmented MP4 — designed for streaming, no muxer buffering
+      // MPEG-TS output
       '-f', 'mpegts',
       '-mpegts_flags', '+initial_discontinuity',
+      '-muxdelay', '0',
+      '-muxpreload', '0',
+      '-flush_packets', '1',
       'pipe:1',
     ];
 

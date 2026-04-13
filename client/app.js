@@ -45,7 +45,7 @@ function handleUrlInput(inputUrl) {
 // --- WebSocket ---
 function connect() {
   initPlayer();
-  
+
   ws = new WebSocket(`ws://${window.location.host}`);
 
   ws.onopen = () => {
@@ -59,6 +59,7 @@ function connect() {
     myId = null;
     isController = false;
     if (player) {
+      clearInterval(player._liveSeekTimer);
       player.destroy();
       player = null;
     }
@@ -125,6 +126,7 @@ function send(obj) {
 // --- Media player ---
 function initPlayer() {
   if (player) {
+    clearInterval(player._liveSeekTimer);
     player.destroy();
     player = null;
   }
@@ -142,8 +144,8 @@ function initPlayer() {
   }, {
     enableWorker: true,
     liveBufferLatencyChasing: true,
-    liveBufferLatencyMaxLatency: 1.5,
-    liveBufferLatencyMinRemain: 0.3,
+    liveBufferLatencyMaxLatency: 0.4,
+    liveBufferLatencyMinRemain: 0.1,
     autoCleanupSourceBuffer: true,
     autoCleanupMaxBackwardDuration: 5,
     autoCleanupMinBackwardDuration: 3,
@@ -152,26 +154,33 @@ function initPlayer() {
   player.attachMediaElement(video);
   player.load();
 
-  // Attempt autoplay (will work because video is muted)
-  player.play().catch(() => {
-    // Autoplay blocked — user will click unmute which can also trigger play
-  });
+  video.play().catch(() => {});
 
-  // Error recovery
-  player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-    console.error('mpegts.js error:', errorType, errorDetail, errorInfo);
-    // Attempt recovery after a delay
+  // Seek to live edge whenever buffer accumulates
+  player._liveSeekTimer = setInterval(() => {
+    if (!video.buffered.length) return;
+    const end = video.buffered.end(video.buffered.length - 1);
+    const latency = end - video.currentTime;
+    let dbg = document.getElementById('latency-dbg');
+    if (!dbg) {
+      dbg = document.createElement('div');
+      dbg.id = 'latency-dbg';
+      dbg.style.cssText = 'position:fixed;top:4px;right:4px;background:rgba(0,0,0,.7);color:#0f0;font:bold 14px monospace;padding:4px 8px;z-index:9999;pointer-events:none';
+      document.body.appendChild(dbg);
+    }
+    dbg.textContent = `buf: ${latency.toFixed(2)}s | ${video.paused ? 'PAUSED' : 'playing'}`;
+    if (latency > 0.5) {
+      video.currentTime = end - 0.1;
+    }
+  }, 500);
+
+  player.on(mpegts.Events.ERROR, () => {
     setTimeout(() => {
       if (player) {
         player.destroy();
         initPlayer();
       }
     }, 2000);
-  });
-
-  player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
-    // Optional: display stats for debugging
-    console.debug('mpegts stats:', stats);
   });
 }
 
@@ -271,21 +280,17 @@ const MOUSE_MOVE_INTERVAL = 33; // ~30fps
 let lastMouseMove = 0;
 
 function getVideoCoords(e) {
-  // Map overlay coordinates to the 1920x1080 remote browser viewport
-  // The video uses object-fit:contain, so we need to account for letterboxing
   const rect = overlay.getBoundingClientRect();
   const videoRatio = 1920 / 1080;
   const containerRatio = rect.width / rect.height;
 
   let renderWidth, renderHeight, offsetX, offsetY;
   if (containerRatio > videoRatio) {
-    // Letterboxed on sides
     renderHeight = rect.height;
     renderWidth = rect.height * videoRatio;
     offsetX = (rect.width - renderWidth) / 2;
     offsetY = 0;
   } else {
-    // Letterboxed top/bottom
     renderWidth = rect.width;
     renderHeight = rect.width / videoRatio;
     offsetX = 0;

@@ -10,6 +10,13 @@ mkdir -p /run/dbus
 dbus-daemon --system --nofork &
 sleep 0.5
 
+# Configure PulseAudio for low latency
+mkdir -p /etc/pulse
+cat > /etc/pulse/daemon.conf <<PULSEEOF
+default-fragment-size-msec = 10
+default-fragments = 2
+PULSEEOF
+
 # Start PulseAudio with TCP socket (avoids Unix socket path issues as root)
 pulseaudio \
   --exit-idle-time=-1 \
@@ -22,6 +29,9 @@ sleep 0.5
 # Create the virtual audio sink
 pactl load-module module-null-sink sink_name=virtual_speaker sink_properties=device.description=Virtual_Speaker
 pactl set-default-sink virtual_speaker
+
+# Feed continuous silence so FFmpeg's audio input never blocks
+pacat --playback -d virtual_speaker --format=s16le --rate=44100 --channels=2 < /dev/zero &
 
 echo "PulseAudio ready — default sink: virtual_speaker"
 pactl list sinks short
