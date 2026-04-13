@@ -36,5 +36,10 @@ pacat --playback -d virtual_speaker --format=s16le --rate=44100 --channels=2 < /
 echo "PulseAudio ready — default sink: virtual_speaker"
 pactl list sinks short
 
+# Start MediaMTX (RTSP ingest on 127.0.0.1:8554, WHEP on :8889, WebRTC UDP on :8189)
+mediamtx /etc/mediamtx.yml &
+sleep 0.5
+echo "MediaMTX started"
+
 # Start the Node.js server
 exec node server/index.js

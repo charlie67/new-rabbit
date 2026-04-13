@@ -7,25 +7,42 @@ import { Room } from './room.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3000;
+const MEDIAMTX_HOST = process.env.MEDIAMTX_HOST || '127.0.0.1';
+const MEDIAMTX_PORT = Number(process.env.MEDIAMTX_PORT || 8889);
 
 const app = express();
+
+// Proxy WHEP signaling (and related WebRTC HTTP routes) to MediaMTX.
+// Mounted before express.static so it takes precedence for /live/*.
+// In production, Caddy can proxy /live/* directly to MediaMTX and bypass Node.
+app.use('/live', (req, res) => {
+  const upstream = http.request({
+    host: MEDIAMTX_HOST,
+    port: MEDIAMTX_PORT,
+    method: req.method,
+    path: req.originalUrl,
+    headers: { ...req.headers, host: `${MEDIAMTX_HOST}:${MEDIAMTX_PORT}` },
+  }, (upRes) => {
+    res.writeHead(upRes.statusCode, upRes.headers);
+    upRes.pipe(res);
+  });
+  upstream.on('error', (err) => {
+    console.error('WHEP proxy error:', err.message);
+    if (!res.headersSent) res.writeHead(502).end('Bad Gateway');
+  });
+  req.pipe(upstream);
+});
+
 app.use(express.static(path.join(__dirname, '..', 'client')));
 
 const server = http.createServer(app);
- // Control WebSocket at / — carries JSON messages (mouse, keyboard, navigation, etc.)
+// Control WebSocket at / — carries JSON messages (mouse, keyboard, navigation, etc.)
 const controlWss = new WebSocketServer({ noServer: true });
-
-// Media WebSocket at /media — carries MPEG-TS binary stream
-const mediaWss = new WebSocketServer({ noServer: true });
 
 const room = new Room();
 
 controlWss.on('connection', (ws) => {
   room.addClient(ws);
-});
-
-mediaWss.on('connection', (ws) => {
-  room.addMediaClient(ws);
 });
 
 server.on('upgrade', (request, socket, head) => {
@@ -35,12 +52,7 @@ server.on('upgrade', (request, socket, head) => {
     controlWss.handleUpgrade(request, socket, head, (ws) => {
       controlWss.emit('connection', ws, request);
     });
-  } else if (pathname === '/media') {
-    mediaWss.handleUpgrade(request, socket, head, (ws) => {
-      mediaWss.emit('connection', ws, request);
-    });
   } else {
-    // Destroy connections to unknown paths
     socket.destroy();
   }
 });

@@ -13,12 +13,16 @@ const controlBtn = document.getElementById('control-btn');
 const controllerStatus = document.getElementById('controller-status');
 const audioBtn = document.getElementById('audio-btn');
 
+const WHEP_URL = `${window.location.origin}/live/whep`;
+
 // --- State ---
 let ws = null;
 let myId = null;
 let isController = false;
 let users = [];
 let player = null;
+
+let showWebRtcStatsOverlay = true;
 
 // --- Audio unmute ---
 audioBtn.addEventListener('click', () => {
@@ -48,7 +52,8 @@ function handleUrlInput(inputUrl) {
 function connect() {
   initPlayer();
 
-  ws = new WebSocket(`ws://${window.location.host}`);
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${wsProtocol}//${window.location.host}`);
 
   ws.onopen = () => {
     connectionStatus.textContent = 'Connected';
@@ -60,11 +65,7 @@ function connect() {
     connectionStatus.className = 'disconnected';
     myId = null;
     isController = false;
-    if (player) {
-      clearInterval(player._liveSeekTimer);
-      player.destroy();
-      player = null;
-    }
+    destroyPlayer();
     updateControlUI();
     setTimeout(connect, 2000);
   };
@@ -125,44 +126,93 @@ function send(obj) {
   }
 }
 
-// --- Media player ---
-function initPlayer() {
-  if (player) {
-    clearInterval(player._liveSeekTimer);
-    player.destroy();
-    player = null;
-  }
+// --- Media player (WebRTC via WHEP) ---
+function destroyPlayer() {
+  if (!player) return;
+  clearInterval(player._dbgTimer);
+  try { player.close(); } catch {}
+  player = null;
+  video.srcObject = null;
+}
 
-  if (!mpegts.isSupported()) {
-    console.error('mpegts.js is not supported in this browser');
+async function initPlayer() {
+  destroyPlayer();
+
+  const pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    bundlePolicy: 'max-bundle',
+  });
+  player = pc;
+
+  // Receive-only transceivers — we're a viewer, not a sender
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  pc.addTransceiver('audio', { direction: 'recvonly' });
+
+  const mediaStream = new MediaStream();
+  video.srcObject = mediaStream;
+  pc.ontrack = (event) => {
+    mediaStream.addTrack(event.track);
+    video.play().catch(() => {});
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc !== player) return;
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      console.warn('WebRTC disconnected, reconnecting...');
+      setTimeout(() => { if (player === pc) initPlayer(); }, 2000);
+    }
+  };
+
+  try {
+    await pc.setLocalDescription(await pc.createOffer());
+
+    // Wait for ICE gathering to complete (non-trickle WHEP)
+    if (pc.iceGatheringState !== 'complete') {
+      await new Promise((resolve) => {
+        const check = () => {
+          if (pc.iceGatheringState === 'complete') {
+            pc.removeEventListener('icegatheringstatechange', check);
+            resolve();
+          }
+        };
+        pc.addEventListener('icegatheringstatechange', check);
+      });
+    }
+
+    const response = await fetch(WHEP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: pc.localDescription.sdp,
+    });
+    if (!response.ok) {
+      console.error('WHEP request failed:', response.status, await response.text());
+      setTimeout(() => { if (player === pc) initPlayer(); }, 2000);
+      return;
+    }
+    const answerSdp = await response.text();
+    await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+  } catch (err) {
+    console.error('WHEP setup error:', err);
+    setTimeout(() => { if (player === pc) initPlayer(); }, 2000);
     return;
   }
 
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  player = mpegts.createPlayer({
-    type: 'mpegts',
-    isLive: true,
-    url: `${protocol}//${window.location.host}/media`,
-  }, {
-    enableWorker: true,
-    liveBufferLatencyChasing: true,
-    liveBufferLatencyMaxLatency: 0.4,
-    liveBufferLatencyMinRemain: 0.1,
-    autoCleanupSourceBuffer: true,
-    autoCleanupMaxBackwardDuration: 5,
-    autoCleanupMinBackwardDuration: 3,
-  });
-
-  player.attachMediaElement(video);
-  player.load();
-
-  video.play().catch(() => {});
-
-  // Seek to live edge whenever buffer accumulates
-  player._liveSeekTimer = setInterval(() => {
-    if (!video.buffered.length) return;
-    const end = video.buffered.end(video.buffered.length - 1);
-    const latency = end - video.currentTime;
+  // Debug overlay: RTT, jitter, fps
+  pc._dbgTimer = setInterval(async () => {
+    if (pc !== player) return;
+    const stats = await pc.getStats();
+    let jitter = 0, rtt = 0, fps = 0; packetsLost = 0;
+    stats.forEach((r) => {
+      console.debug("WebRTC stat:", r.type, r);
+      if (r.type === 'inbound-rtp' && r.kind === 'video') {
+        jitter = (r.jitter || 0) * 1000;
+        fps = r.framesPerSecond || 0;
+        packetsLost = r.packetsLost || 0;
+      }
+      if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) {
+        rtt = (r.currentRoundTripTime || 0) * 1000;
+      }
+    });
     let dbg = document.getElementById('latency-dbg');
     if (!dbg) {
       dbg = document.createElement('div');
@@ -170,20 +220,14 @@ function initPlayer() {
       dbg.style.cssText = 'position:fixed;top:4px;right:4px;background:rgba(0,0,0,.7);color:#0f0;font:bold 14px monospace;padding:4px 8px;z-index:9999;pointer-events:none';
       document.body.appendChild(dbg);
     }
-    dbg.textContent = `buf: ${latency.toFixed(2)}s | ${video.paused ? 'PAUSED' : 'playing'}`;
-    if (latency > 0.5) {
-      video.currentTime = end - 0.1;
-    }
-  }, 500);
+    
+    // Update display style every tick based on the variable
+    dbg.style.display = showWebRtcStatsOverlay ? 'block' : 'none';
 
-  player.on(mpegts.Events.ERROR, () => {
-    setTimeout(() => {
-      if (player) {
-        player.destroy();
-        initPlayer();
-      }
-    }, 2000);
-  });
+    const textContent = `rtt:${rtt.toFixed(0)}ms jit:${jitter.toFixed(1)}ms ${fps.toFixed(0)}fps pktLost:${packetsLost} ${video.paused ? 'PAUSED' : 'play'}`;
+    dbg.textContent = textContent;
+    console.debug('WebRTC stats:', textContent);
+  }, 1000);
 }
 
 // --- UI updates ---

@@ -46,7 +46,6 @@ export class BrowserManager {
     this.inputQueue = Promise.resolve();
 
     // Callbacks set by Room
-    this.onMedia = null;
     this.onUrlChange = null;
 
     // Offset between X11 screen coords (FFmpeg) and page viewport coords (CDP)
@@ -171,36 +170,35 @@ export class BrowserManager {
       '-probesize', '32',
       '-i', 'default',
 
-      '-vf', 'scale=1280:720',
+      // '-vf', 'scale=1280:720',
       '-af', 'aresample=async=1:first_pts=0',  // don't let audio block video
 
-      // Video encoding — H.264 with zero-latency tuning
+      // Video encoding — H.264 baseline profile for WebRTC compatibility
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
+      '-profile:v', 'baseline',
+      '-level', '3.1',
       '-crf', '23',
       '-g', '30',
       '-threads', '2',
       '-pix_fmt', 'yuv420p',
 
-      // Audio encoding
-      '-c:a', 'aac',
+      // Audio encoding — Opus (required by WebRTC; AAC is not supported)
+      '-c:a', 'libopus',
       '-b:a', '128k',
+      '-ar', '48000',
+      '-ac', '2',
+      '-application', 'lowdelay',
 
-      // MPEG-TS output
-      '-f', 'mpegts',
-      '-mpegts_flags', '+initial_discontinuity',
-      '-muxdelay', '0',
-      '-muxpreload', '0',
-      '-flush_packets', '1',
-      'pipe:1',
+      // RTSP push to local MediaMTX
+      '-f', 'rtsp',
+      '-rtsp_transport', 'tcp',
+      '-muxdelay', '0.1',
+      'rtsp://127.0.0.1:8554/live',
     ];
 
     this.stream = spawn('ffmpeg', ffmpegArgs);
-
-    this.stream.stdout.on('data', (chunk) => {
-      if (this.onMedia) this.onMedia(chunk);
-    });
 
     this.stream.stderr.on('data', (data) => {
       // FFmpeg stats go to stderr — uncomment to debug

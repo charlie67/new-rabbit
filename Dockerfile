@@ -1,6 +1,11 @@
+FROM bluenviron/mediamtx:1 AS mediamtx
+
 FROM node:20-slim
 
-# Install Chromium, Xvfb (virtual display), PulseAudio, and dbus
+# MediaMTX binary (config comes from our mediamtx.yml, copied below)
+COPY --from=mediamtx /mediamtx /usr/local/bin/mediamtx
+
+# Install Chromium, Xvfb (virtual display), PulseAudio, dbus, ffmpeg
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     xvfb \
@@ -25,14 +30,19 @@ RUN mkdir -p /root/.config/pulse && echo "" > /root/.config/pulse/default.pa
 
 ENV PULSE_SERVER=tcp:127.0.0.1:4713
 
+# App setup
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 COPY server/ server/
 COPY client/ client/
+COPY mediamtx.yml /etc/mediamtx.yml
 COPY docker-entrypoint.sh .
 RUN chmod +x docker-entrypoint.sh
 
-EXPOSE 3000
+# 3000: Node (HTTP + control WebSocket + WHEP proxy)
+# 8889/tcp: MediaMTX WHEP HTTP (for Caddy reverse-proxy target if bypassing Node)
+# 8189/udp: MediaMTX WebRTC media — MUST be exposed directly (not via Caddy)
+EXPOSE 3000 8889 8189/udp
 
 ENTRYPOINT ["./docker-entrypoint.sh"]

@@ -1,0 +1,42 @@
+# MediaMTX — RTSP ingest (localhost) → WebRTC egress (WHEP)
+
+logLevel: info
+logDestinations: [stdout]
+
+# Disable unused protocols
+hls: no
+rtmp: no
+srt: no
+api: no
+metrics: no
+playback: no
+
+# RTSP server — localhost only, FFmpeg publishes here
+rtsp: yes
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+
+# WebRTC HTTP (WHEP signaling) — plain HTTP
+webrtc: yes
+webrtcAddress: :8889
+webrtcEncryption: no
+webrtcAllowOrigin: "*"
+webrtcTrustedProxies: []
+
+# WebRTC media transport — UDP; exposed directly (not through Caddy)
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: ""
+webrtcIPsFromInterfaces: yes
+
+# Public hostnames to advertise in ICE candidates.
+# Override in production via env: MTX_WEBRTCADDITIONALHOSTS=room-name.domain.com
+webrtcAdditionalHosts: []
+
+# Public STUN so clients behind NAT can discover their reflexive address
+webrtcICEServers2:
+  - url: stun:stun.l.google.com:19302
+
+# Single path; FFmpeg pushes here as an RTSP publisher
+paths:
+  live:
+    source: publisher

@@ -5,15 +5,9 @@ import { BrowserManager } from './browser-manager.js';
 export class Room {
   constructor() {
     this.clients = new Map(); // id -> { id, ws, nickname, isController }
-    this.mediaClients = new Set(); // WebSocket connections on /media path
     this.controllerId = null;
     this.browser = new BrowserManager();
 
-    // Buffer MPEG-TS data from last keyframe so new clients can sync immediately
-    this.keyframeBuffer = [];
-    this.tsBuf = Buffer.alloc(0);
-
-    this.browser.onMedia = (chunk) => this.broadcastMedia(chunk);
     this.browser.onUrlChange = (url) => this.broadcast({
       type: MSG.URL_CHANGED,
       url,
@@ -184,53 +178,6 @@ export class Room {
 
   broadcastUserList() {
     this.broadcast({ type: MSG.USER_LIST, users: this.getUserList() });
-  }
-
-  // --- Media WS ---
-  addMediaClient(ws) {
-    // Send buffered data from last keyframe so client can decode immediately
-    for (const buf of this.keyframeBuffer) {
-      ws.send(buf);
-    }
-    this.mediaClients.add(ws);
-    console.log(`Media client connected. Total media clients: ${this.mediaClients.size}`);
-
-    ws.on('close', () => {
-      this.mediaClients.delete(ws);
-      console.log(`Media client disconnected. Total media clients: ${this.mediaClients.size}`);
-    });
-
-    ws.on('error', () => {
-      this.mediaClients.delete(ws);
-    });
-  }
-
-  broadcastMedia(chunk) {
-    // Parse TS packets to detect keyframes (random_access_indicator)
-    this.tsBuf = Buffer.concat([this.tsBuf, chunk]);
-    while (this.tsBuf.length >= 188) {
-      const sync = this.tsBuf.indexOf(0x47);
-      if (sync === -1) { this.tsBuf = Buffer.alloc(0); break; }
-      if (sync > 0) this.tsBuf = this.tsBuf.subarray(sync);
-      if (this.tsBuf.length < 188) break;
-
-      const hasAdaptation = (this.tsBuf[3] & 0x20) !== 0;
-      if (hasAdaptation && this.tsBuf[4] > 0 && (this.tsBuf[5] & 0x40) !== 0) {
-        // Random access point — new keyframe, reset buffer
-        this.keyframeBuffer = [];
-      }
-      this.tsBuf = this.tsBuf.subarray(188);
-    }
-
-    this.keyframeBuffer.push(chunk);
-    // Cap buffer at ~2 seconds of data to prevent memory growth
-    while (this.keyframeBuffer.length > 200) this.keyframeBuffer.shift();
-
-    for (const ws of this.mediaClients) {
-      if (ws.readyState === 1 && ws.bufferedAmount < 128 * 1024) {
-        ws.send(chunk);
-      }
-    }
   }
 
   async close() {
