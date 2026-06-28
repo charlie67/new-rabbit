@@ -1,13 +1,20 @@
 import defaultPuppeteer from 'puppeteer';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
-import { execSync } from 'child_process';
 import { addExtra } from 'puppeteer-extra';
 import rebrowserPuppeteer from 'rebrowser-puppeteer-core';
-import { spawn } from 'child_process';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const EXTENSION_PATH = path.resolve(__dirname, '..', 'extension');
+// Deterministic id derived from the manifest "key". Allowlisting this id lets
+// the extension use tabCapture without the activeTab invocation gesture.
+const EXTENSION_ID = 'kmifelfcngladpfkjblidkebdcocnnjc';
 
 const VIEWPORT = { width: 1920, height: 1080 };
+const FRAME_RATE = 30;
+// MediaMTX WebRTC server (same one that serves WHEP). The extension publishes
+// here over WHIP, in-container, on loopback.
+const WHIP_URL = process.env.WHIP_URL || 'http://127.0.0.1:8889/live/whip';
 
 // Windows virtual key codes for special keys (needed by CDP dispatchKeyEvent)
 const KEY_CODES = {
@@ -42,16 +49,11 @@ export class BrowserManager {
     this.browser = null;
     this.page = null;
     this.cdp = null;
-    this.stream = null;
+    this.worker = null; // extension service worker (drives tab capture + WHIP)
     this.inputQueue = Promise.resolve();
 
     // Callbacks set by Room
     this.onUrlChange = null;
-
-    // Offset between X11 screen coords (FFmpeg) and page viewport coords (CDP)
-    // Chrome UI (tab bar, etc.) pushes the viewport down from the top of the screen
-    this.viewportOffsetX = 0;
-    this.viewportOffsetY = 0;
   }
 
   async launch(serverPort = 3000) {
@@ -66,12 +68,15 @@ export class BrowserManager {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu',
+        '--disable-gpu', // no GPU in container — Chrome encodes H.264 in software (OpenH264)
         `--window-size=${VIEWPORT.width},${VIEWPORT.height}`,
         '--autoplay-policy=no-user-gesture-required',
         '--disable-features=AudioServiceSandbox',
         '--disable-blink-features=AutomationControlled',
-        '--auto-accept-this-tab-capture',
+        '--auto-accept-this-tab-capture', // suppress the tabCapture permission prompt
+        `--allowlisted-extension-id=${EXTENSION_ID}`, // bypass activeTab gesture for tabCapture
+        `--disable-extensions-except=${EXTENSION_PATH}`,
+        `--load-extension=${EXTENSION_PATH}`,
         '--display=:99',
         '--start-maximized',
         '--kiosk',
@@ -114,103 +119,39 @@ export class BrowserManager {
 
     await this.page.bringToFront();
 
-    try {
-      // Force X11 to maximize and focus the Chrome window
-      execSync(`
-        export DISPLAY=:99
-        WID=$(xdotool search --onlyvisible --class "google-chrome" | head -1)
-        if [ ! -z "$WID" ]; then
-          xdotool windowactivate --sync "$WID"
-          xdotool windowfocus "$WID"
-          echo "Chrome window focused via xdotool"
-        fi
-      `, { shell: '/bin/bash', timeout: 5000 });
-    } catch (err) {
-      console.warn('xdotool focus failed (non-fatal):', err.message);
-    }
-
-    await new Promise((r) => setTimeout(r, 500));
-
-    // Measure the offset between the X11 screen and the page viewport.
-    // FFmpeg captures the full screen, but CDP coordinates are relative to
-    // the page viewport (which starts below any Chrome UI like the tab bar).
+    // tabCapture captures only the tab's web-content area (no browser chrome),
+    // so the captured frame == the page viewport == CDP input coords (1:1).
+    // Sanity-check that the kiosk viewport matches what clients will see.
     const { innerWidth, innerHeight } = await this.page.evaluate(() => ({
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
     }));
-    this.viewportOffsetY = VIEWPORT.height - innerHeight;
-    this.viewportOffsetX = Math.round((VIEWPORT.width - innerWidth) / 2);
-    console.log(`Viewport: ${innerWidth}x${innerHeight}, offset: (${this.viewportOffsetX}, ${this.viewportOffsetY})`);
+    if (innerWidth !== VIEWPORT.width || innerHeight !== VIEWPORT.height) {
+      console.warn(`Viewport ${innerWidth}x${innerHeight} != expected ${VIEWPORT.width}x${VIEWPORT.height}`);
+    }
 
     await this.startMediaStream();
     console.log('Browser launched, media stream started');
   }
 
+  // Drive the loaded extension to capture the controlled tab and publish it to
+  // MediaMTX over WHIP. Replaces the old FFmpeg/x11grab/RTSP pipeline.
   async startMediaStream() {
-    const ffmpegArgs = [
-      // Low-latency global flags
-      '-fflags', 'nobuffer',
-      '-flags', 'low_delay',
-      '-analyzeduration', '0',
+    const target = await this.browser.waitForTarget(
+      (t) => t.type() === 'service_worker' && t.url().startsWith('chrome-extension://'),
+      { timeout: 30000 }
+    );
+    this.worker = await target.worker();
 
-      // Video input — x11grab (wallclock timestamps prevent muxer stalls)
-      '-use_wallclock_as_timestamps', '1',
-      '-thread_queue_size', '512',
-      '-f', 'x11grab',
-      '-draw_mouse', '0',
-      '-probesize', '32',
-      '-video_size', '1920x1080',
-      '-framerate', '30',
-      '-i', ':99.0',
+    const result = await this.worker.evaluate(
+      (args) => self.startCapture(args),
+      { whipUrl: WHIP_URL, width: VIEWPORT.width, height: VIEWPORT.height, frameRate: FRAME_RATE }
+    );
 
-      // Audio input — PulseAudio (wallclock timestamps to stay in sync with video)
-      '-use_wallclock_as_timestamps', '1',
-      '-thread_queue_size', '512',
-      '-f', 'pulse',
-      '-probesize', '32',
-      '-i', 'default',
-
-      // '-vf', 'scale=1280:720',
-      '-af', 'aresample=async=1:first_pts=0',  // don't let audio block video
-
-      // Video encoding — H.264 baseline profile for WebRTC compatibility
-      '-c:v', 'libx264',
-      '-preset', 'ultrafast',
-      '-tune', 'zerolatency',
-      '-profile:v', 'baseline',
-      '-level', '3.1',
-      '-crf', '23',
-      '-g', '30',
-      '-threads', '2',
-      '-pix_fmt', 'yuv420p',
-
-      // Audio encoding — Opus (required by WebRTC; AAC is not supported)
-      '-c:a', 'libopus',
-      '-b:a', '128k',
-      '-ar', '48000',
-      '-ac', '2',
-      '-application', 'lowdelay',
-
-      // RTSP push to local MediaMTX
-      '-f', 'rtsp',
-      '-rtsp_transport', 'tcp',
-      '-muxdelay', '0.1',
-      'rtsp://127.0.0.1:8554/live',
-    ];
-
-    this.stream = spawn('ffmpeg', ffmpegArgs);
-
-    this.stream.stderr.on('data', (data) => {
-      // FFmpeg stats go to stderr — uncomment to debug
-      console.log(`FFmpeg: ${data}`);
-    });
-
-    this.stream.on('close', (code) => {
-      console.log(`FFmpeg exited with code ${code}`);
-    });
-    this.stream.on('error', (err) => {
-      console.error("FFmpeg failed to start:", err.message);
-    });
+    if (!result || !result.ok) {
+      throw new Error(`tabCapture/WHIP failed: ${result && result.error ? result.error : 'unknown'}`);
+    }
+    console.log(`tabCapture publishing to ${WHIP_URL} (${result.codec || 'codec?'})`);
   }
 
   async navigate(url) {
@@ -262,11 +203,11 @@ export class BrowserManager {
     }[subType];
     if (!cdpType) return;
 
-    // Convert screen coords (from FFmpeg capture) to page viewport coords (for CDP)
+    // tabCapture frames == viewport, so client coords map 1:1 to CDP coords.
     const params = {
       type: cdpType,
-      x: Math.round(x) - this.viewportOffsetX,
-      y: Math.round(y) - this.viewportOffsetY,
+      x: Math.round(x),
+      y: Math.round(y),
       button: options.button || (cdpType === 'mouseMoved' ? 'none' : 'left'),
       clickCount: options.clickCount || (cdpType === 'mousePressed' || cdpType === 'mouseReleased' ? 1 : 0),
       modifiers: options.modifiers || 0,
@@ -279,8 +220,8 @@ export class BrowserManager {
   dispatchWheel(x, y, deltaX, deltaY, modifiers = 0) {
     const params = {
       type: 'mouseWheel',
-      x: Math.round(x) - this.viewportOffsetX,
-      y: Math.round(y) - this.viewportOffsetY,
+      x: Math.round(x),
+      y: Math.round(y),
       deltaX: deltaX || 0,
       deltaY: deltaY || 0,
       modifiers,
@@ -314,9 +255,13 @@ export class BrowserManager {
   }
 
   async close() {
-    if (this.stream) {
-      this.stream.destroy();
-      this.stream = null;
+    if (this.worker) {
+      try {
+        await this.worker.evaluate(() => self.stopCapture());
+      } catch (err) {
+        console.warn('stopCapture failed (non-fatal):', err.message);
+      }
+      this.worker = null;
     }
     if (this.browser) {
       await this.browser.close();

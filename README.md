@@ -16,7 +16,6 @@ Port 8189 is used for WebRTC media (UDP + TCP)
 MAKE SURE YOU USE CHROME!!! No I don't know why it won't work in firefox but it won't. 
 
 Very very WIP
-* Latency is bad (very very bad)
 * No copy/paste
 * Can only use 1 tab
 * No shortcuts

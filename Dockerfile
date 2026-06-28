@@ -5,17 +5,13 @@ FROM node:20-slim
 # MediaMTX binary (config comes from our mediamtx.yml, copied below)
 COPY --from=mediamtx /mediamtx /usr/local/bin/mediamtx
 
-# Install Chromium, Xvfb (virtual display), PulseAudio, dbus, ffmpeg
+# Install Chromium and Xvfb (virtual display). Capture + encode + audio all run
+# inside Chrome now (tabCapture + WebRTC), so no ffmpeg/pulseaudio needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     xvfb \
-    xdotool \
-    pulseaudio \
-    pulseaudio-utils \
-    dbus \
     fonts-liberation \
     fonts-noto-color-emoji \
-    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Tell Puppeteer to use the system Chromium
@@ -25,17 +21,13 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 # Xvfb display
 ENV DISPLAY=:99
 
-# Clear any default PulseAudio config — entrypoint handles setup
-RUN mkdir -p /root/.config/pulse && echo "" > /root/.config/pulse/default.pa
-
-ENV PULSE_SERVER=tcp:127.0.0.1:4713
-
 # App setup
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 COPY server/ server/
 COPY client/ client/
+COPY extension/ extension/
 COPY mediamtx.yml /etc/mediamtx.yml
 COPY docker-entrypoint.sh .
 RUN chmod +x docker-entrypoint.sh

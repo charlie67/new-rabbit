@@ -1,22 +1,20 @@
-# MediaMTX — RTSP ingest (localhost) → WebRTC egress (WHEP)
+# MediaMTX — WebRTC ingest (WHIP, in-container) → WebRTC egress (WHEP, clients)
 
 logLevel: info
 logDestinations: [stdout]
 
-# Disable unused protocols
+# Disable unused protocols. RTSP is gone: the browser extension now publishes
+# directly over WHIP to the WebRTC server below, so there's no FFmpeg/RTSP hop.
 hls: no
 rtmp: no
 srt: no
+rtsp: no
 api: no
 metrics: no
 playback: no
 
-# RTSP server — localhost only, FFmpeg publishes here
-rtsp: yes
-rtspAddress: 127.0.0.1:8554
-rtspTransports: [tcp]
-
-# WebRTC HTTP (WHEP signaling) — plain HTTP
+# WebRTC HTTP — serves both WHIP (ingest, from the in-container extension) and
+# WHEP (egress, to browser clients) on the same port.
 webrtc: yes
 webrtcAddress: :8889
 webrtcEncryption: no
@@ -41,7 +39,7 @@ webrtcAdditionalHosts: [127.0.0.1]
 webrtcICEServers2:
   - url: stun:stun.l.google.com:19302
 
-# Single path; FFmpeg pushes here as an RTSP publisher
+# Single path; the browser extension pushes here as a WHIP publisher
 paths:
   live:
     source: publisher

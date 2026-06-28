@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Rabbit Tab Streamer",
+  "version": "1.0.0",
+  "description": "Captures the controlled tab with tabCapture and publishes it to MediaMTX via WHIP.",
+  "minimum_chrome_version": "116",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtvPV/ehMIKbeWhKg+anDgvvkvCWNjQw6SwJYMkZYRBwO4omnYMz9/nH8lj5iKWUyNp1EInqJ3g8VysEngXYHYbBnhm56MfimQJn48jcOJ4nUuCneCMrzk1KpLWqFgVXGPTQOW+m9Jm4U+HH6No3d6Z2T9WKRYfKfJHbTJDEEVuPkvyPdYCF6eAoP9Xg/pLxmx4mmO4HlZg0DajTbWqR0cREACte8ZyoQJkM9/nTq7h0bKQd/01AP+DGcG82dZARXcK+UixSeoGoc+HyhEQ8il+2sItCdkiT8e/x0Jqo9Te0w+pkEXNf+mD8yAQwZtEWCyFHtBz4urCrPDHNOE5shdwIDAQAB",
+  "permissions": ["tabCapture", "offscreen"],
+  "host_permissions": ["http://127.0.0.1:8889/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
