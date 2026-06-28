@@ -20,17 +20,22 @@ rtspTransports: [tcp]
 webrtc: yes
 webrtcAddress: :8889
 webrtcEncryption: no
-webrtcAllowOrigin: "*"
+webrtcAllowOrigins: ["*"]
 webrtcTrustedProxies: []
 
-# WebRTC media transport — UDP; exposed directly (not through Caddy)
+# WebRTC media transport — exposed directly (not through Caddy).
+# UDP is preferred (lowest latency). TCP is also enabled so the media path works
+# in environments that don't forward UDP over localhost (e.g. WSL2 in NAT mode):
+# the browser falls back to the TCP candidate when the UDP one is unreachable.
 webrtcLocalUDPAddress: :8189
-webrtcLocalTCPAddress: ""
+webrtcLocalTCPAddress: :8189
 webrtcIPsFromInterfaces: yes
 
 # Public hostnames to advertise in ICE candidates.
-# Override in production via env: MTX_WEBRTCADDITIONALHOSTS=room-name.domain.com
-webrtcAdditionalHosts: []
+# 127.0.0.1 lets a browser on the Docker host reach the published media port.
+# For LAN/remote access add the host's LAN IP; in production override via env:
+# MTX_WEBRTCADDITIONALHOSTS=room-name.domain.com
+webrtcAdditionalHosts: [127.0.0.1]
 
 # Public STUN so clients behind NAT can discover their reflexive address
 webrtcICEServers2:

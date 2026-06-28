@@ -42,7 +42,8 @@ RUN chmod +x docker-entrypoint.sh
 
 # 3000: Node (HTTP + control WebSocket + WHEP proxy)
 # 8889/tcp: MediaMTX WHEP HTTP (for Caddy reverse-proxy target if bypassing Node)
-# 8189/udp: MediaMTX WebRTC media — MUST be exposed directly (not via Caddy)
-EXPOSE 3000 8889 8189/udp
+# 8189/udp + 8189/tcp: MediaMTX WebRTC media — MUST be exposed directly (not via
+# Caddy). TCP is the fallback transport where UDP can't traverse (e.g. WSL2 NAT).
+EXPOSE 3000 8889 8189/udp 8189/tcp
 
 ENTRYPOINT ["./docker-entrypoint.sh"]

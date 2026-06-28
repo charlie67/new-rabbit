@@ -138,8 +138,13 @@ function destroyPlayer() {
 async function initPlayer() {
   destroyPlayer();
 
+  // No STUN: the WHEP server advertises directly-reachable host candidates, so the
+  // viewer only needs its own host candidates. Adding STUN makes the client gather a
+  // srflx candidate on the same public IP the server advertises; on a same-NAT setup
+  // ICE then attempts a NAT-hairpin pair that most routers drop, and the connection
+  // fails even though the host-candidate pair would have worked.
   const pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: [],
     bundlePolicy: 'max-bundle',
   });
   player = pc;
@@ -166,15 +171,18 @@ async function initPlayer() {
   try {
     await pc.setLocalDescription(await pc.createOffer());
 
-    // Wait for ICE gathering to complete (non-trickle WHEP)
+    // Wait for ICE gathering to complete (non-trickle WHEP), but cap the wait:
+    // gathering can stall indefinitely (e.g. an unreachable STUN/TURN server), and
+    // host candidates — all we need here — are ready almost immediately.
     if (pc.iceGatheringState !== 'complete') {
       await new Promise((resolve) => {
-        const check = () => {
-          if (pc.iceGatheringState === 'complete') {
-            pc.removeEventListener('icegatheringstatechange', check);
-            resolve();
-          }
+        const done = () => {
+          pc.removeEventListener('icegatheringstatechange', check);
+          clearTimeout(timer);
+          resolve();
         };
+        const check = () => { if (pc.iceGatheringState === 'complete') done(); };
+        const timer = setTimeout(done, 1000);
         pc.addEventListener('icegatheringstatechange', check);
       });
     }
