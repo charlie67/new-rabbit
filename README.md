@@ -13,8 +13,10 @@ Then navigate to http://localhost:3000/
 Port 3000 is used for the node web UI
 Port 8189 is used for WebRTC media (UDP + TCP)
 
-To reach it from another machine, set the host's LAN/public address instead:
-
-docker run -p 3000:3000 -p 8189:8189/udp -p 8189:8189 -e MTX_WEBRTCADDITIONALHOSTS=<host-ip> new-rabbit
+MAKE SURE YOU USE CHROME!!! No I don't know why it won't work in firefox but it won't. 
 
 Very very WIP
+* Latency is bad (very very bad)
+* No copy/paste
+* Can only use 1 tab
+* No shortcuts
